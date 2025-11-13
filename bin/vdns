@@ -1,0 +1,737 @@
+#!/usr/bin/env bash
+
+# @describe ViewDNS API client for domain and DNS information
+# @flag -l --list List only (minimal output)
+# @flag -d --debug Debug mode (show raw API responses)
+# @flag -j --json Raw JSON output
+# @env VIEWDNS_API_KEY! ViewDNS API key (required)
+# @meta require-tools curl,jq
+
+# Setup colors early
+setup_colors() {
+  if [ -z "$TERM" ] || [ "$TERM" = "dumb" ]; then
+    bold="" reset="" blue="" green="" yellow="" cyan="" magenta="" red=""
+  else
+    bold=$(tput bold 2>/dev/null || echo "")
+    reset=$(tput sgr0 2>/dev/null || echo "")
+    # shellcheck disable=SC2034  
+    blue=$(tput setaf 4 2>/dev/null || echo "")
+    green=$(tput setaf 2 2>/dev/null || echo "")
+    yellow=$(tput setaf 3 2>/dev/null || echo "")
+    cyan=$(tput setaf 6 2>/dev/null || echo "")
+    magenta=$(tput setaf 5 2>/dev/null || echo "")
+    red=$(tput setaf 1 2>/dev/null || echo "")
+  fi
+}
+setup_colors
+
+API_BASE="https://api.viewdns.info"
+
+debug_output() {
+  # shellcheck disable=SC2154  # argc_debug is provided by argc framework
+  if [ "$argc_debug" = 1 ]; then
+    printf "\n${magenta}[DEBUG]${reset} %s\n" "$1"
+    echo "$2"
+    printf "%s\n\n" "${magenta}[END DEBUG]${reset}"
+  fi
+}
+
+make_request() {
+  local endpoint="$1"
+  local params="$2"
+
+  local response
+  response=$(curl -s "${API_BASE}/${endpoint}/?${params}&apikey=${VIEWDNS_API_KEY}&output=json")
+  local status=$?
+
+  if [ $status -ne 0 ]; then
+    printf "%s" "${red}Error:${reset} Failed to make API request to "
+    printf "%s\n" "$endpoint" >&2
+    exit 1
+  fi
+
+  if ! echo "$response" | jq -e . >/dev/null 2>&1; then
+    printf "%s\n" "${red}Error:${reset} Invalid JSON response from API" >&2
+    exit 1
+  fi
+
+  echo "$response"
+}
+
+# @cmd Get DNS records for a domain
+# @arg domain! Domain to query
+dns() {
+  # shellcheck disable=SC2154  # argc_domain is provided by argc framework
+  local response
+  # shellcheck disable=SC2154  # argc_domain is provided by argc framework
+  response=$(make_request "dnsrecord" "domain=$argc_domain")
+  debug_output "DNS Record API Response:" "$response"
+
+  # shellcheck disable=SC2154  # argc_json is provided by argc framework
+  if [ "$argc_json" = 1 ]; then
+    echo "$response" | jq '.'
+    return 0
+  fi
+
+  # shellcheck disable=SC2154  # argc_list is provided by argc framework
+  if [ "$argc_list" = 1 ]; then
+    echo "$response" | jq -r '.response.records[].data // empty' 2>/dev/null || {
+      echo "No DNS records found or unable to parse response"
+      return 1
+    }
+  else
+    printf "%s" "${cyan}DNS Records for ${bold}${argc_domain}${reset}:"
+    printf "\n"
+    printf "%s\n" "${cyan}------------------------${reset}"
+
+    local records
+    records=$(echo "$response" | jq -r '.response.records[]? | "\(.type)\t\(.name)\t\(.ttl)\t\(.data)"' 2>/dev/null)
+    if [ -n "$records" ]; then
+      printf "%s\n" "${yellow}TYPE	NAME	TTL	DATA${reset}"
+      echo "$records" | column -t -s $'\t'
+    else
+      echo "No DNS records found"
+    fi
+  fi
+}
+
+# @cmd Get IP history for a domain
+# @arg domain! Domain to query
+history() {
+  # shellcheck disable=SC2154  # argc_domain is provided by argc framework
+  local response
+  response=$(make_request "iphistory" "domain=$argc_domain")
+  debug_output "IP History API Response:" "$response"
+
+  # shellcheck disable=SC2154  # argc_json is provided by argc framework
+  if [ "$argc_json" = 1 ]; then
+    echo "$response" | jq '.'
+    return 0
+  fi
+
+  if ! echo "$response" | jq -e '.response.records' >/dev/null 2>&1; then
+    printf "${yellow}No IP history records found for ${bold}%s${reset}\n" "$argc_domain"
+    return 0
+  fi
+
+  if [ "$argc_list" = 1 ]; then
+    echo "$response" | jq -r '.response.records[]?.ip // empty' 2>/dev/null || {
+      echo "No IP history found or unable to parse response"
+      return 1
+    }
+  else
+    printf "${cyan}Historical IPs for ${bold}%s${reset}:\n" "$argc_domain"
+    printf "${cyan}%s${reset}\n" "------------------------"
+
+    local records
+    records=$(echo "$response" | jq -r '.response.records[]? | "\(.ip)\t\(.location)\t\(.owner)\t\(.lastseen)"' 2>/dev/null)
+    if [ -n "$records" ]; then
+      printf "%s\n" "${yellow}IP	LOCATION	OWNER	LAST SEEN${reset}"
+      echo "$records" | column -t -s $'\t'
+    else
+      echo "No IP history found"
+    fi
+  fi
+}
+
+# @cmd Get domains using a specific mail server
+# @arg mailserver! Mail server to query
+reversemx() {
+  # shellcheck disable=SC2154  # argc_mailserver is provided by argc framework
+  local response
+  # shellcheck disable=SC2154  # argc_mailserver is provided by argc framework
+  response=$(make_request "reversemx" "mx=$argc_mailserver")
+  debug_output "Reverse MX API Response:" "$response"
+
+  # shellcheck disable=SC2154  # argc_json is provided by argc framework
+  if [ "$argc_json" = 1 ]; then
+    echo "$response" | jq '.'
+    return 0
+  fi
+
+  if ! echo "$response" | jq -e '.response.domains' >/dev/null 2>&1; then
+    printf "${yellow}No domains found using mail server ${bold}%s${reset}\n" "$argc_mailserver"
+    return 0
+  fi
+
+  local domain_count
+  domain_count=$(echo "$response" | jq -r '.response.domain_count // 0' 2>/dev/null)
+
+  if [ "$argc_list" = 1 ]; then
+    echo "$response" | jq -r '.response.domains[]? // empty' 2>/dev/null || {
+      echo "No domains found or unable to parse response"
+      return 1
+    }
+  else
+    printf "${cyan}Domains using mail server ${bold}%s${reset}:\n" "$argc_mailserver"
+    printf "${cyan}%s${reset}\n" "------------------------"
+    printf "${green}Total domains found: ${bold}%s${reset}\n\n" "$domain_count"
+
+    local domains
+    domains=$(echo "$response" | jq -r '.response.domains[]? // empty' 2>/dev/null)
+    if [ -n "$domains" ]; then
+      echo "$domains" | pr -3 -t
+    else
+      echo "No domains found"
+    fi
+  fi
+}
+
+# @cmd Get domains hosted on the same IP address
+# @arg host! IP address or hostname to query
+reverseip() {
+  # shellcheck disable=SC2154  # argc_host is provided by argc framework
+  local response
+  # shellcheck disable=SC2154  # argc_host is provided by argc framework
+  response=$(make_request "reverseip" "host=$argc_host")
+  debug_output "Reverse IP API Response:" "$response"
+
+  # shellcheck disable=SC2154  # argc_json is provided by argc framework
+  if [ "$argc_json" = 1 ]; then
+    echo "$response" | jq '.'
+    return 0
+  fi
+
+  if ! echo "$response" | jq -e '.response.domains' >/dev/null 2>&1; then
+    printf "${yellow}No domains found hosted on ${bold}%s${reset}\n" "$argc_host"
+    return 0
+  fi
+
+  local domain_count
+  domain_count=$(echo "$response" | jq -r '.response.domain_count // 0' 2>/dev/null)
+
+  if [ "$argc_list" = 1 ]; then
+    echo "$response" | jq -r '.response.domains[]?.name // empty' 2>/dev/null || {
+      echo "No domains found or unable to parse response"
+      return 1
+    }
+  else
+    printf "${cyan}Domains hosted on ${bold}%s${reset}:\n" "$argc_host"
+    printf "${cyan}%s${reset}\n" "------------------------"
+    printf "${green}Total domains found: ${bold}%s${reset}\n\n" "$domain_count"
+
+    if echo "$response" | jq -e '.response.domains[0].last_resolved' >/dev/null 2>&1; then
+      printf "%s\n" "${yellow}DOMAIN	LAST RESOLVED${reset}"
+      printf "%s\n" "${yellow}------	-------------${reset}"
+      local domain_info
+      domain_info=$(echo "$response" | jq -r '.response.domains[]? | "\(.name)\t\(.last_resolved)"' 2>/dev/null)
+      if [ -n "$domain_info" ]; then
+        echo "$domain_info" | column -t -s $'\t'
+      else
+        echo "Unable to parse domain information"
+      fi
+    else
+      local domains
+      domains=$(echo "$response" | jq -r '.response.domains[]?.name // empty' 2>/dev/null)
+      if [ -n "$domains" ]; then
+        echo "$domains" | pr -3 -t
+      else
+        echo "No domains found"
+      fi
+    fi
+  fi
+}
+
+# ARGC-BUILD {
+# This block was generated by argc (https://github.com/sigoden/argc).
+# Modifying it manually is not recommended
+
+_argc_run() {
+    if [[ "${1:-}" == "___internal___" ]]; then
+        _argc_die "error: unsupported ___internal___ command"
+    fi
+    if [[ "${OS:-}" == "Windows_NT" ]] && [[ -n "${MSYSTEM:-}" ]]; then
+        set -o igncr
+    fi
+    argc__args=("$(basename "$0" .sh)" "$@")
+    argc__positionals=()
+    _argc_index=1
+    _argc_len="${#argc__args[@]}"
+    _argc_tools=()
+    _argc_parse
+    _argc_require_tools "${_argc_tools[@]}"
+    if [ -n "${argc__fn:-}" ]; then
+        $argc__fn "${argc__positionals[@]}"
+    fi
+}
+
+_argc_usage() {
+    cat <<-'EOF'
+ViewDNS API client for domain and DNS information
+
+USAGE: vdns [OPTIONS] <COMMAND>
+
+OPTIONS:
+  -l, --list     List only (minimal output)
+  -d, --debug    Debug mode (show raw API responses)
+  -j, --json     Raw JSON output
+  -h, --help     Print help
+  -V, --version  Print version
+
+COMMANDS:
+  dns        Get DNS records for a domain
+  history    Get IP history for a domain
+  reversemx  Get domains using a specific mail server
+  reverseip  Get domains hosted on the same IP address
+
+ENVIRONMENTS:
+  VIEWDNS_API_KEY*  ViewDNS API key (required)
+EOF
+    exit
+}
+
+_argc_version() {
+    echo vdns 0.0.0
+    exit
+}
+
+_argc_parse() {
+    local _argc_key _argc_action
+    local _argc_subcmds="dns, history, reversemx, reverseip"
+    while [[ $_argc_index -lt $_argc_len ]]; do
+        _argc_item="${argc__args[_argc_index]}"
+        _argc_key="${_argc_item%%=*}"
+        case "$_argc_key" in
+        --help | -help | -h)
+            _argc_usage
+            ;;
+        --version | -version | -V)
+            _argc_version
+            ;;
+        --)
+            _argc_dash="${#argc__positionals[@]}"
+            argc__positionals+=("${argc__args[@]:$((_argc_index + 1))}")
+            _argc_index=$_argc_len
+            break
+            ;;
+        --list | -l)
+            if [[ "$_argc_item" == *=* ]]; then
+                _argc_die "error: flag \`--list\` don't accept any value"
+            fi
+            _argc_index=$((_argc_index + 1))
+            if [[ -n "${argc_list:-}" ]]; then
+                _argc_die "error: the argument \`--list\` cannot be used multiple times"
+            else
+                argc_list=1
+            fi
+            ;;
+        --debug | -d)
+            if [[ "$_argc_item" == *=* ]]; then
+                _argc_die "error: flag \`--debug\` don't accept any value"
+            fi
+            _argc_index=$((_argc_index + 1))
+            if [[ -n "${argc_debug:-}" ]]; then
+                _argc_die "error: the argument \`--debug\` cannot be used multiple times"
+            else
+                argc_debug=1
+            fi
+            ;;
+        --json | -j)
+            if [[ "$_argc_item" == *=* ]]; then
+                _argc_die "error: flag \`--json\` don't accept any value"
+            fi
+            _argc_index=$((_argc_index + 1))
+            if [[ -n "${argc_json:-}" ]]; then
+                _argc_die "error: the argument \`--json\` cannot be used multiple times"
+            else
+                argc_json=1
+            fi
+            ;;
+        dns)
+            _argc_index=$((_argc_index + 1))
+            _argc_action=_argc_parse_dns
+            break
+            ;;
+        history)
+            _argc_index=$((_argc_index + 1))
+            _argc_action=_argc_parse_history
+            break
+            ;;
+        reversemx)
+            _argc_index=$((_argc_index + 1))
+            _argc_action=_argc_parse_reversemx
+            break
+            ;;
+        reverseip)
+            _argc_index=$((_argc_index + 1))
+            _argc_action=_argc_parse_reverseip
+            break
+            ;;
+        help)
+            local help_arg="${argc__args[$((_argc_index + 1))]:-}"
+            case "$help_arg" in
+            dns)
+                _argc_usage_dns
+                ;;
+            history)
+                _argc_usage_history
+                ;;
+            reversemx)
+                _argc_usage_reversemx
+                ;;
+            reverseip)
+                _argc_usage_reverseip
+                ;;
+            "")
+                _argc_usage
+                ;;
+            *)
+                _argc_die "error: invalid value \`$help_arg\` for \`<command>\`"$'\n'"  [possible values: $_argc_subcmds]"
+                ;;
+            esac
+            ;;
+        *)
+            if _argc_maybe_flag_option "-" "$_argc_item"; then
+                _argc_die "error: unexpected argument \`$_argc_key\` found"
+            fi
+            _argc_die "error: \`vdns\` requires a subcommand but one was not provided"$'\n'"  [subcommands: $_argc_subcmds]"
+            ;;
+        esac
+    done
+    _argc_tools=(curl jq)
+    if [[ -n "${_argc_action:-}" ]]; then
+        $_argc_action
+    else
+        _argc_usage
+    fi
+}
+
+_argc_usage_dns() {
+    cat <<-'EOF'
+Get DNS records for a domain
+
+USAGE: vdns dns <DOMAIN>
+
+ARGS:
+  <DOMAIN>  Domain to query
+
+ENVIRONMENTS:
+  VIEWDNS_API_KEY*  ViewDNS API key (required)
+EOF
+    exit
+}
+
+_argc_parse_dns() {
+    local _argc_key _argc_action
+    local _argc_subcmds=""
+    while [[ $_argc_index -lt $_argc_len ]]; do
+        _argc_item="${argc__args[_argc_index]}"
+        _argc_key="${_argc_item%%=*}"
+        case "$_argc_key" in
+        --help | -help | -h)
+            _argc_usage_dns
+            ;;
+        --)
+            _argc_dash="${#argc__positionals[@]}"
+            argc__positionals+=("${argc__args[@]:$((_argc_index + 1))}")
+            _argc_index=$_argc_len
+            break
+            ;;
+        *)
+            argc__positionals+=("$_argc_item")
+            _argc_index=$((_argc_index + 1))
+            ;;
+        esac
+    done
+    _argc_tools=(curl jq)
+    if [[ -n "${_argc_action:-}" ]]; then
+        $_argc_action
+    else
+        argc__fn=dns
+        if [[ "${argc__positionals[0]:-}" == "help" ]] && [[ "${#argc__positionals[@]}" -eq 1 ]]; then
+            _argc_usage_dns
+        fi
+        _argc_match_positionals 0
+        local values_index values_size
+        IFS=: read -r values_index values_size <<<"${_argc_match_positionals_values[0]:-}"
+        if [[ -n "$values_index" ]]; then
+            argc_domain="${argc__positionals[values_index]}"
+        else
+            _argc_die "error: the required environments \`<DOMAIN>\` were not provided"
+        fi
+        _argc_require_params "error: the following required environments were not provided:" \
+            VIEWDNS_API_KEY:VIEWDNS_API_KEY
+    fi
+}
+
+_argc_usage_history() {
+    cat <<-'EOF'
+Get IP history for a domain
+
+USAGE: vdns history <DOMAIN>
+
+ARGS:
+  <DOMAIN>  Domain to query
+
+ENVIRONMENTS:
+  VIEWDNS_API_KEY*  ViewDNS API key (required)
+EOF
+    exit
+}
+
+_argc_parse_history() {
+    local _argc_key _argc_action
+    local _argc_subcmds=""
+    while [[ $_argc_index -lt $_argc_len ]]; do
+        _argc_item="${argc__args[_argc_index]}"
+        _argc_key="${_argc_item%%=*}"
+        case "$_argc_key" in
+        --help | -help | -h)
+            _argc_usage_history
+            ;;
+        --)
+            _argc_dash="${#argc__positionals[@]}"
+            argc__positionals+=("${argc__args[@]:$((_argc_index + 1))}")
+            _argc_index=$_argc_len
+            break
+            ;;
+        *)
+            argc__positionals+=("$_argc_item")
+            _argc_index=$((_argc_index + 1))
+            ;;
+        esac
+    done
+    _argc_tools=(curl jq)
+    if [[ -n "${_argc_action:-}" ]]; then
+        $_argc_action
+    else
+        argc__fn=history
+        if [[ "${argc__positionals[0]:-}" == "help" ]] && [[ "${#argc__positionals[@]}" -eq 1 ]]; then
+            _argc_usage_history
+        fi
+        _argc_match_positionals 0
+        local values_index values_size
+        IFS=: read -r values_index values_size <<<"${_argc_match_positionals_values[0]:-}"
+        if [[ -n "$values_index" ]]; then
+            argc_domain="${argc__positionals[values_index]}"
+        else
+            _argc_die "error: the required environments \`<DOMAIN>\` were not provided"
+        fi
+        _argc_require_params "error: the following required environments were not provided:" \
+            VIEWDNS_API_KEY:VIEWDNS_API_KEY
+    fi
+}
+
+_argc_usage_reversemx() {
+    cat <<-'EOF'
+Get domains using a specific mail server
+
+USAGE: vdns reversemx <MAILSERVER>
+
+ARGS:
+  <MAILSERVER>  Mail server to query
+
+ENVIRONMENTS:
+  VIEWDNS_API_KEY*  ViewDNS API key (required)
+EOF
+    exit
+}
+
+_argc_parse_reversemx() {
+    local _argc_key _argc_action
+    local _argc_subcmds=""
+    while [[ $_argc_index -lt $_argc_len ]]; do
+        _argc_item="${argc__args[_argc_index]}"
+        _argc_key="${_argc_item%%=*}"
+        case "$_argc_key" in
+        --help | -help | -h)
+            _argc_usage_reversemx
+            ;;
+        --)
+            _argc_dash="${#argc__positionals[@]}"
+            argc__positionals+=("${argc__args[@]:$((_argc_index + 1))}")
+            _argc_index=$_argc_len
+            break
+            ;;
+        *)
+            argc__positionals+=("$_argc_item")
+            _argc_index=$((_argc_index + 1))
+            ;;
+        esac
+    done
+    _argc_tools=(curl jq)
+    if [[ -n "${_argc_action:-}" ]]; then
+        $_argc_action
+    else
+        argc__fn=reversemx
+        if [[ "${argc__positionals[0]:-}" == "help" ]] && [[ "${#argc__positionals[@]}" -eq 1 ]]; then
+            _argc_usage_reversemx
+        fi
+        _argc_match_positionals 0
+        local values_index values_size
+        IFS=: read -r values_index values_size <<<"${_argc_match_positionals_values[0]:-}"
+        if [[ -n "$values_index" ]]; then
+            argc_mailserver="${argc__positionals[values_index]}"
+        else
+            _argc_die "error: the required environments \`<MAILSERVER>\` were not provided"
+        fi
+        _argc_require_params "error: the following required environments were not provided:" \
+            VIEWDNS_API_KEY:VIEWDNS_API_KEY
+    fi
+}
+
+_argc_usage_reverseip() {
+    cat <<-'EOF'
+Get domains hosted on the same IP address
+
+USAGE: vdns reverseip <HOST>
+
+ARGS:
+  <HOST>  IP address or hostname to query
+
+ENVIRONMENTS:
+  VIEWDNS_API_KEY*  ViewDNS API key (required)
+EOF
+    exit
+}
+
+_argc_parse_reverseip() {
+    local _argc_key _argc_action
+    local _argc_subcmds=""
+    while [[ $_argc_index -lt $_argc_len ]]; do
+        _argc_item="${argc__args[_argc_index]}"
+        _argc_key="${_argc_item%%=*}"
+        case "$_argc_key" in
+        --help | -help | -h)
+            _argc_usage_reverseip
+            ;;
+        --)
+            _argc_dash="${#argc__positionals[@]}"
+            argc__positionals+=("${argc__args[@]:$((_argc_index + 1))}")
+            _argc_index=$_argc_len
+            break
+            ;;
+        *)
+            argc__positionals+=("$_argc_item")
+            _argc_index=$((_argc_index + 1))
+            ;;
+        esac
+    done
+    _argc_tools=(curl jq)
+    if [[ -n "${_argc_action:-}" ]]; then
+        $_argc_action
+    else
+        argc__fn=reverseip
+        if [[ "${argc__positionals[0]:-}" == "help" ]] && [[ "${#argc__positionals[@]}" -eq 1 ]]; then
+            _argc_usage_reverseip
+        fi
+        _argc_match_positionals 0
+        local values_index values_size
+        IFS=: read -r values_index values_size <<<"${_argc_match_positionals_values[0]:-}"
+        if [[ -n "$values_index" ]]; then
+            argc_host="${argc__positionals[values_index]}"
+        else
+            _argc_die "error: the required environments \`<HOST>\` were not provided"
+        fi
+        _argc_require_params "error: the following required environments were not provided:" \
+            VIEWDNS_API_KEY:VIEWDNS_API_KEY
+    fi
+}
+
+_argc_match_positionals() {
+    _argc_match_positionals_values=()
+    _argc_match_positionals_len=0
+    local params=("$@")
+    local args_len="${#argc__positionals[@]}"
+    if [[ $args_len -eq 0 ]]; then
+        return
+    fi
+    local params_len=$# arg_index=0 param_index=0
+    while [[ $param_index -lt $params_len && $arg_index -lt $args_len ]]; do
+        local takes=0
+        if [[ "${params[param_index]}" -eq 1 ]]; then
+            if [[ $param_index -eq 0 ]] &&
+                [[ ${_argc_dash:-} -gt 0 ]] &&
+                [[ $params_len -eq 2 ]] &&
+                [[ "${params[$((param_index + 1))]}" -eq 1 ]] \
+                ; then
+                takes=${_argc_dash:-}
+            else
+                local arg_diff=$((args_len - arg_index)) param_diff=$((params_len - param_index))
+                if [[ $arg_diff -gt $param_diff ]]; then
+                    takes=$((arg_diff - param_diff + 1))
+                else
+                    takes=1
+                fi
+            fi
+        else
+            takes=1
+        fi
+        _argc_match_positionals_values+=("$arg_index:$takes")
+        arg_index=$((arg_index + takes))
+        param_index=$((param_index + 1))
+    done
+    if [[ $arg_index -lt $args_len ]]; then
+        _argc_match_positionals_values+=("$arg_index:$((args_len - arg_index))")
+    fi
+    _argc_match_positionals_len=${#_argc_match_positionals_values[@]}
+    if [[ $params_len -gt 0 ]] && [[ $_argc_match_positionals_len -gt $params_len ]]; then
+        local index="${_argc_match_positionals_values[params_len]%%:*}"
+        _argc_die "error: unexpected argument \`${argc__positionals[index]}\` found"
+    fi
+}
+
+_argc_require_params() {
+    local message="$1" missed_envs="" item name render_name
+    for item in "${@:2}"; do
+        name="${item%%:*}"
+        render_name="${item##*:}"
+        if [[ -z "${!name:-}" ]]; then
+            missed_envs="$missed_envs"$'\n'"  $render_name"
+        fi
+    done
+    if [[ -n "${missed_envs}" ]]; then
+        _argc_die "$message$missed_envs"
+    fi
+}
+
+_argc_maybe_flag_option() {
+    local signs="$1" arg="$2"
+    if [[ -z "$signs" ]]; then
+        return 1
+    fi
+    local cond=false
+    if [[ "$signs" == *"+"* ]]; then
+        if [[ "$arg" =~ ^\+[^+].* ]]; then
+            cond=true
+        fi
+    elif [[ "$arg" == -* ]]; then
+        if (( ${#arg} < 3 )) || [[ ! "$arg" =~ ^---.* ]]; then
+            cond=true
+        fi
+    fi
+    if [[ "$cond" == "false" ]]; then
+        return 1
+    fi
+    local value="${arg%%=*}"
+    if [[ "$value" =~ [[:space:]] ]]; then
+        return 1
+    fi
+    return 0
+}
+
+_argc_require_tools() {
+    local tool missing_tools=()
+    for tool in "$@"; do
+        if ! command -v "$tool" >/dev/null 2>&1; then
+            missing_tools+=("$tool")
+        fi
+    done
+    if [[ "${#missing_tools[@]}" -gt 0 ]]; then
+        echo "error: missing tools: ${missing_tools[*]}" >&2
+        exit 1
+    fi
+}
+
+_argc_die() {
+    if [[ $# -eq 0 ]]; then
+        cat
+    else
+        echo "$*" >&2
+    fi
+    exit 1
+}
+
+_argc_run "$@"
+
+# ARGC-BUILD }

@@ -1,0 +1,235 @@
+#!/usr/bin/env bash
+
+# @describe ViewDNS API client for domain and DNS information
+# @flag -l --list List only (minimal output)
+# @flag -d --debug Debug mode (show raw API responses)
+# @flag -j --json Raw JSON output
+# @env VIEWDNS_API_KEY! ViewDNS API key (required)
+# @meta require-tools curl,jq
+
+# Setup colors early
+setup_colors() {
+  if [ -z "$TERM" ] || [ "$TERM" = "dumb" ]; then
+    bold="" reset="" blue="" green="" yellow="" cyan="" magenta="" red=""
+  else
+    bold=$(tput bold 2>/dev/null || echo "")
+    reset=$(tput sgr0 2>/dev/null || echo "")
+    # shellcheck disable=SC2034  
+    blue=$(tput setaf 4 2>/dev/null || echo "")
+    green=$(tput setaf 2 2>/dev/null || echo "")
+    yellow=$(tput setaf 3 2>/dev/null || echo "")
+    cyan=$(tput setaf 6 2>/dev/null || echo "")
+    magenta=$(tput setaf 5 2>/dev/null || echo "")
+    red=$(tput setaf 1 2>/dev/null || echo "")
+  fi
+}
+setup_colors
+
+API_BASE="https://api.viewdns.info"
+
+debug_output() {
+  # shellcheck disable=SC2154  # argc_debug is provided by argc framework
+  if [ "$argc_debug" = 1 ]; then
+    printf "\n${magenta}[DEBUG]${reset} %s\n" "$1"
+    echo "$2"
+    printf "%s\n\n" "${magenta}[END DEBUG]${reset}"
+  fi
+}
+
+make_request() {
+  local endpoint="$1"
+  local params="$2"
+
+  local response
+  response=$(curl -s "${API_BASE}/${endpoint}/?${params}&apikey=${VIEWDNS_API_KEY}&output=json")
+  local status=$?
+
+  if [ $status -ne 0 ]; then
+    printf "%s" "${red}Error:${reset} Failed to make API request to "
+    printf "%s\n" "$endpoint" >&2
+    exit 1
+  fi
+
+  if ! echo "$response" | jq -e . >/dev/null 2>&1; then
+    printf "%s\n" "${red}Error:${reset} Invalid JSON response from API" >&2
+    exit 1
+  fi
+
+  echo "$response"
+}
+
+# @cmd Get DNS records for a domain
+# @arg domain! Domain to query
+dns() {
+  # shellcheck disable=SC2154  # argc_domain is provided by argc framework
+  local response
+  # shellcheck disable=SC2154  # argc_domain is provided by argc framework
+  response=$(make_request "dnsrecord" "domain=$argc_domain")
+  debug_output "DNS Record API Response:" "$response"
+
+  # shellcheck disable=SC2154  # argc_json is provided by argc framework
+  if [ "$argc_json" = 1 ]; then
+    echo "$response" | jq '.'
+    return 0
+  fi
+
+  # shellcheck disable=SC2154  # argc_list is provided by argc framework
+  if [ "$argc_list" = 1 ]; then
+    echo "$response" | jq -r '.response.records[].data // empty' 2>/dev/null || {
+      echo "No DNS records found or unable to parse response"
+      return 1
+    }
+  else
+    printf "%s" "${cyan}DNS Records for ${bold}${argc_domain}${reset}:"
+    printf "\n"
+    printf "%s\n" "${cyan}------------------------${reset}"
+
+    local records
+    records=$(echo "$response" | jq -r '.response.records[]? | "\(.type)\t\(.name)\t\(.ttl)\t\(.data)"' 2>/dev/null)
+    if [ -n "$records" ]; then
+      printf "%s\n" "${yellow}TYPE	NAME	TTL	DATA${reset}"
+      echo "$records" | column -t -s $'\t'
+    else
+      echo "No DNS records found"
+    fi
+  fi
+}
+
+# @cmd Get IP history for a domain
+# @arg domain! Domain to query
+history() {
+  # shellcheck disable=SC2154  # argc_domain is provided by argc framework
+  local response
+  response=$(make_request "iphistory" "domain=$argc_domain")
+  debug_output "IP History API Response:" "$response"
+
+  # shellcheck disable=SC2154  # argc_json is provided by argc framework
+  if [ "$argc_json" = 1 ]; then
+    echo "$response" | jq '.'
+    return 0
+  fi
+
+  if ! echo "$response" | jq -e '.response.records' >/dev/null 2>&1; then
+    printf "${yellow}No IP history records found for ${bold}%s${reset}\n" "$argc_domain"
+    return 0
+  fi
+
+  if [ "$argc_list" = 1 ]; then
+    echo "$response" | jq -r '.response.records[]?.ip // empty' 2>/dev/null || {
+      echo "No IP history found or unable to parse response"
+      return 1
+    }
+  else
+    printf "${cyan}Historical IPs for ${bold}%s${reset}:\n" "$argc_domain"
+    printf "${cyan}%s${reset}\n" "------------------------"
+
+    local records
+    records=$(echo "$response" | jq -r '.response.records[]? | "\(.ip)\t\(.location)\t\(.owner)\t\(.lastseen)"' 2>/dev/null)
+    if [ -n "$records" ]; then
+      printf "%s\n" "${yellow}IP	LOCATION	OWNER	LAST SEEN${reset}"
+      echo "$records" | column -t -s $'\t'
+    else
+      echo "No IP history found"
+    fi
+  fi
+}
+
+# @cmd Get domains using a specific mail server
+# @arg mailserver! Mail server to query
+reversemx() {
+  # shellcheck disable=SC2154  # argc_mailserver is provided by argc framework
+  local response
+  # shellcheck disable=SC2154  # argc_mailserver is provided by argc framework
+  response=$(make_request "reversemx" "mx=$argc_mailserver")
+  debug_output "Reverse MX API Response:" "$response"
+
+  # shellcheck disable=SC2154  # argc_json is provided by argc framework
+  if [ "$argc_json" = 1 ]; then
+    echo "$response" | jq '.'
+    return 0
+  fi
+
+  if ! echo "$response" | jq -e '.response.domains' >/dev/null 2>&1; then
+    printf "${yellow}No domains found using mail server ${bold}%s${reset}\n" "$argc_mailserver"
+    return 0
+  fi
+
+  local domain_count
+  domain_count=$(echo "$response" | jq -r '.response.domain_count // 0' 2>/dev/null)
+
+  if [ "$argc_list" = 1 ]; then
+    echo "$response" | jq -r '.response.domains[]? // empty' 2>/dev/null || {
+      echo "No domains found or unable to parse response"
+      return 1
+    }
+  else
+    printf "${cyan}Domains using mail server ${bold}%s${reset}:\n" "$argc_mailserver"
+    printf "${cyan}%s${reset}\n" "------------------------"
+    printf "${green}Total domains found: ${bold}%s${reset}\n\n" "$domain_count"
+
+    local domains
+    domains=$(echo "$response" | jq -r '.response.domains[]? // empty' 2>/dev/null)
+    if [ -n "$domains" ]; then
+      echo "$domains" | pr -3 -t
+    else
+      echo "No domains found"
+    fi
+  fi
+}
+
+# @cmd Get domains hosted on the same IP address
+# @arg host! IP address or hostname to query
+reverseip() {
+  # shellcheck disable=SC2154  # argc_host is provided by argc framework
+  local response
+  # shellcheck disable=SC2154  # argc_host is provided by argc framework
+  response=$(make_request "reverseip" "host=$argc_host")
+  debug_output "Reverse IP API Response:" "$response"
+
+  # shellcheck disable=SC2154  # argc_json is provided by argc framework
+  if [ "$argc_json" = 1 ]; then
+    echo "$response" | jq '.'
+    return 0
+  fi
+
+  if ! echo "$response" | jq -e '.response.domains' >/dev/null 2>&1; then
+    printf "${yellow}No domains found hosted on ${bold}%s${reset}\n" "$argc_host"
+    return 0
+  fi
+
+  local domain_count
+  domain_count=$(echo "$response" | jq -r '.response.domain_count // 0' 2>/dev/null)
+
+  if [ "$argc_list" = 1 ]; then
+    echo "$response" | jq -r '.response.domains[]?.name // empty' 2>/dev/null || {
+      echo "No domains found or unable to parse response"
+      return 1
+    }
+  else
+    printf "${cyan}Domains hosted on ${bold}%s${reset}:\n" "$argc_host"
+    printf "${cyan}%s${reset}\n" "------------------------"
+    printf "${green}Total domains found: ${bold}%s${reset}\n\n" "$domain_count"
+
+    if echo "$response" | jq -e '.response.domains[0].last_resolved' >/dev/null 2>&1; then
+      printf "%s\n" "${yellow}DOMAIN	LAST RESOLVED${reset}"
+      printf "%s\n" "${yellow}------	-------------${reset}"
+      local domain_info
+      domain_info=$(echo "$response" | jq -r '.response.domains[]? | "\(.name)\t\(.last_resolved)"' 2>/dev/null)
+      if [ -n "$domain_info" ]; then
+        echo "$domain_info" | column -t -s $'\t'
+      else
+        echo "Unable to parse domain information"
+      fi
+    else
+      local domains
+      domains=$(echo "$response" | jq -r '.response.domains[]?.name // empty' 2>/dev/null)
+      if [ -n "$domains" ]; then
+        echo "$domains" | pr -3 -t
+      else
+        echo "No domains found"
+      fi
+    fi
+  fi
+}
+
+eval "$(argc --argc-eval "$0" "$@")"
