@@ -80,15 +80,22 @@ dns() {
       return 1
     }
   else
-    printf "%s" "${cyan}DNS Records for ${bold}${argc_domain}${reset}:"
-    printf "\n"
-    printf "%s\n" "${cyan}------------------------${reset}"
+    printf "${cyan}DNS Records for ${bold}%s${reset}:\n\n" "$argc_domain"
 
     local records
     records=$(echo "$response" | jq -r '.response.records[]? | "\(.type)\t\(.name)\t\(.ttl)\t\(.data)"' 2>/dev/null)
     if [ -n "$records" ]; then
-      printf "%s\n" "${yellow}TYPE	NAME	TTL	DATA${reset}"
-      echo "$records" | column -t -s $'\t'
+      # Print headers and data using column for consistent alignment
+      {
+        printf "TYPE\tNAME\tTTL\tDATA\n"
+        printf "%s\n" "$records"
+      } | column -t -s $'\t' | {
+        # Read and colorize the first line (header)
+        IFS= read -r header
+        printf "${yellow}%s${reset}\n" "$header"
+        # Output the rest
+        cat
+      }
     else
       echo "No DNS records found"
     fi
@@ -120,14 +127,22 @@ history() {
       return 1
     }
   else
-    printf "${cyan}Historical IPs for ${bold}%s${reset}:\n" "$argc_domain"
-    printf "${cyan}%s${reset}\n" "------------------------"
+    printf "${cyan}Historical IPs for ${bold}%s${reset}:\n\n" "$argc_domain"
 
     local records
     records=$(echo "$response" | jq -r '.response.records[]? | "\(.ip)\t\(.location)\t\(.owner)\t\(.lastseen)"' 2>/dev/null)
     if [ -n "$records" ]; then
-      printf "%s\n" "${yellow}IP	LOCATION	OWNER	LAST SEEN${reset}"
-      echo "$records" | column -t -s $'\t'
+      # Print headers and data using column for consistent alignment
+      {
+        printf "IP\tLOCATION\tOWNER\tLAST_SEEN\n"
+        printf "%s\n" "$records"
+      } | column -t -s $'\t' | {
+        # Read and colorize the first line (header)
+        IFS= read -r header
+        printf "${yellow}%s${reset}\n" "$header"
+        # Output the rest
+        cat
+      }
     else
       echo "No IP history found"
     fi
@@ -164,7 +179,6 @@ reversemx() {
     }
   else
     printf "${cyan}Domains using mail server ${bold}%s${reset}:\n" "$argc_mailserver"
-    printf "${cyan}%s${reset}\n" "------------------------"
     printf "${green}Total domains found: ${bold}%s${reset}\n\n" "$domain_count"
 
     local domains
@@ -207,16 +221,23 @@ reverseip() {
     }
   else
     printf "${cyan}Domains hosted on ${bold}%s${reset}:\n" "$argc_host"
-    printf "${cyan}%s${reset}\n" "------------------------"
     printf "${green}Total domains found: ${bold}%s${reset}\n\n" "$domain_count"
 
     if echo "$response" | jq -e '.response.domains[0].last_resolved' >/dev/null 2>&1; then
-      printf "%s\n" "${yellow}DOMAIN	LAST RESOLVED${reset}"
-      printf "%s\n" "${yellow}------	-------------${reset}"
       local domain_info
       domain_info=$(echo "$response" | jq -r '.response.domains[]? | "\(.name)\t\(.last_resolved)"' 2>/dev/null)
       if [ -n "$domain_info" ]; then
-        echo "$domain_info" | column -t -s $'\t'
+        # Print headers and data using column for consistent alignment
+        {
+          printf "DOMAIN\tLAST_RESOLVED\n"
+          printf "%s\n" "$domain_info"
+        } | column -t -s $'\t' | {
+          # Read and colorize the first line (header)
+          IFS= read -r header
+          printf "${yellow}%s${reset}\n" "$header"
+          # Output the rest
+          cat
+        }
       else
         echo "Unable to parse domain information"
       fi
